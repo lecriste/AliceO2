@@ -21,7 +21,50 @@
 #ifdef WITH_OPENMP
 #include <omp.h>
 #endif
+
+#include <iostream>
+#include <alpaka/alpaka.hpp>
+
+// Define accelerator and host types
+using Dim = alpaka::DimInt<2>; // 2D grid
+using Idx = std::size_t; // Index type
+
+// Host Device and Host Platform
+using Host = alpaka::AccCpuSerial<Dim, Idx>;
+using PltfHost = alpaka::Platform<Host>;
+
+// Accelerator and Accelerator Platform
+//using Acc = alpaka::AccGpuCudaRt<Dim, Idx>; // GPU accelerator
+using Acc = alpaka::AccCpuSerial<Dim, Idx>;
+using PltfAcc = alpaka::Platform<Acc>; // Accelerator Platform
+
+std::ostream& usings = (std::cout << "\nafter alpaka usings\n");
+
 using namespace o2::itsmft;
+
+//__________________________________________________
+// Alpaka section
+
+struct ClusterKernel
+{
+    template <typename Acc>
+    ALPAKA_FN_ACC void operator()(
+        Acc const& acc,
+        int* pixelData,
+        int* clusterResults,
+        int npix) const
+    {
+        auto const globalIdx = alpaka::getIdx<alpaka::Grid, alpaka::Blocks>(acc);
+        auto const idx = globalIdx[0];
+
+        if (idx >= npix) {
+            return; // Out of bounds
+        }
+
+        // Basic example logic
+        clusterResults[idx] = pixelData[idx];
+    }
+};
 
 //__________________________________________________
 void Clusterer::process(int nThreads, PixelReader& reader, CompClusCont* compClus,
@@ -170,6 +213,17 @@ void Clusterer::process(int nThreads, PixelReader& reader, CompClusCont* compClu
 void Clusterer::ClustererThread::process(uint16_t chip, uint16_t nChips, CompClusCont* compClusPtr, PatternCont* patternsPtr,
                                          const ConstMCTruth* labelsDigPtr, MCTruth* labelsClPtr, const ROFRecord& rofPtr)
 {
+  // Retrieve the host device
+  auto platformHost = PltfHost{};
+  auto deviceHost = alpaka::getDevByIdx(platformHost, 0);
+
+  // Retrieve the device for accelerator
+  auto platformAcc = PltfAcc{};
+  auto deviceAcc = alpaka::getDevByIdx(platformAcc, 0);
+
+  // Create a queue for the device
+  auto queue = alpaka::QueueCpuBlocking{deviceAcc};
+
   if (stats.empty() || stats.back().firstChip + stats.back().nChips != chip) { // there is a jump, register new block
     stats.emplace_back(ThreadStat{chip, 0, uint32_t(compClusPtr->size()), patternsPtr ? uint32_t(patternsPtr->size()) : 0, 0, 0});
   }
@@ -191,11 +245,57 @@ void Clusterer::ClustererThread::process(uint16_t chip, uint16_t nChips, CompClu
         finishChipSingleHitFast(valp, curChipData, compClusPtr, patternsPtr, labelsDigPtr, labelsClPtr);
       } else {
         initChip(curChipData, valp);
+        //__________________________________________________
+        // Alpaka section
+
+        // Prepare pixel data and output container
+        std::vector<int> pixelDataHost(npix, 0);
+        std::vector<int> clusterResultsHost(npix, 0);
+
+        // Flatten chip data into a format usable by the kernel
+        for (int i = 0; i < npix; ++i) {
+          pixelDataHost[i] = curChipData->getData()[i].isMasked() ? 0 : 1;
+        }
+
+        // Allocate Alpaka buffers for input/output
+        auto hostPixelData = alpaka::allocBuf<int, Idx>(deviceHost, alpaka::Vec<Dim, Idx>::all(npix));
+        auto hostClusterResults = alpaka::allocBuf<int, Idx>(deviceHost, alpaka::Vec<Dim, Idx>::all(npix));
+        auto devPixelData = alpaka::allocBuf<int, Idx>(deviceAcc, alpaka::Vec<Dim, Idx>::all(npix));
+        auto devClusterResults = alpaka::allocBuf<int, Idx>(deviceAcc, alpaka::Vec<Dim, Idx>::all(npix));
+
+        // Copy data to device
+        std::memcpy(alpaka::getPtrNative(hostPixelData), pixelDataHost.data(), npix * sizeof(int));
+        alpaka::memcpy(queue, devPixelData, hostPixelData);
+        alpaka::wait(queue); // Ensure data transfer is complete
+
+        // Define kernel execution configuration
+        auto const gridSize = alpaka::Vec<Dim, Idx>::all(npix);
+        auto const blockSize = alpaka::Vec<Dim, Idx>::all(1);
+        auto const workDiv = alpaka::WorkDivMembers<Dim, Idx>(gridSize, blockSize, alpaka::Vec<Dim, Idx>::all(1));
+
+        // Launch the kernel
+        alpaka::enqueue(queue, alpaka::createTaskKernel<Acc>(
+                                   workDiv, ClusterKernel{},
+                                   alpaka::getPtrNative(devPixelData),
+                                   alpaka::getPtrNative(devClusterResults),
+                                   npix));
+        alpaka::wait(queue); // Ensure kernel execution is complete
+
+        // Copy results back to host
+        alpaka::memcpy(queue, hostClusterResults, devClusterResults);
+        alpaka::wait(queue); // Ensure data transfer is complete
+
+        // Extract results from Alpaka buffer
+        std::memcpy(clusterResultsHost.data(), alpaka::getPtrNative(hostClusterResults), npix * sizeof(int));
+        //__________________________________________________
+
+        // Process the results (updateChip equivalent)
         for (; validPixID < npix; validPixID++) {
-          if (!curChipData->getData()[validPixID].isMasked()) {
+          if (clusterResultsHost[validPixID]) {
             updateChip(curChipData, validPixID);
           }
         }
+
         finishChip(curChipData, compClusPtr, patternsPtr, labelsDigPtr, labelsClPtr);
       }
     }
