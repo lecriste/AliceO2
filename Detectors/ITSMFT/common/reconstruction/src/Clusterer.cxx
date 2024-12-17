@@ -35,8 +35,8 @@ using PltfHost = alpaka::Platform<Host>;
 
 // Accelerator and Accelerator Platform
 //using Acc = alpaka::AccGpuCudaRt<Dim, Idx>; // GPU accelerator
-//using Acc = alpaka::AccCpuSerial<Dim, Idx>;
-using Acc = alpaka::AccCpuOmp2Threads<Dim, Idx>;
+using Acc = alpaka::AccCpuSerial<Dim, Idx>;
+//using Acc = alpaka::AccCpuOmp2Threads<Dim, Idx>;
 using PltfAcc = alpaka::Platform<Acc>; // Accelerator Platform
 
 std::ostream& usings = (std::cout << "\nafter alpaka usings\n");

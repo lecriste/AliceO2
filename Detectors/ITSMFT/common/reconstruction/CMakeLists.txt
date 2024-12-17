@@ -90,9 +90,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Enable a CPU backend for Alpaka (choose one)
 add_definitions(-D ALPAKA_ACC_CPU_B_SEQ_T_SEQ_ENABLED) # Serial backend
+#add_definitions(-D ALPAKA_ACC_CPU_B_SEQ_T_OMP2_ENABLED)
+
 # Explicitly disable OpenMP
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-openmp")
-add_definitions(-DALPAKA_ACC_CPU_B_OMP2_ENABLED=0)
+#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-openmp")
+#add_definitions(-DALPAKA_ACC_CPU_B_OMP2_ENABLED=0)
 
 # Enable Alpaka GPU backend (if using GPUs)
 #add_definitions(-DALPAKA_ACC_GPU_CUDA_ENABLED)
