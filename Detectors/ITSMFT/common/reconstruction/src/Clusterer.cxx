@@ -26,7 +26,7 @@
 #include <alpaka/alpaka.hpp>
 
 // Define accelerator and host types
-using Dim = alpaka::DimInt<2>; // 2D grid
+using Dim = alpaka::DimInt<1>; // 1D grid
 using Idx = std::size_t; // Index type
 
 // Host Device and Host Platform
@@ -45,27 +45,114 @@ using namespace o2::itsmft;
 //__________________________________________________
 // Alpaka section
 
-struct ClusterKernel
-{
+struct ChipsSoA {
+  std::vector<uint8_t> isMaskedFlat;  // Flattened 1D vector of all pixels for all chips
+  std::vector<int> chip_nPixels;  // Number of pixels per chip
+
+  void resizeChips(int nChips) {
+    chip_nPixels.resize(nChips);
+  }
+
+  void resizeChipPixels(int chipIdx, int nPixels) {
+    if (chipIdx >= chip_nPixels.size()) {
+      throw std::out_of_range("chipIdx exceeds the number of chips.");
+    }
+    chip_nPixels[chipIdx] = nPixels;
+
+    // Resize the flat array to accommodate all pixels
+    int totalPixels = 0;
+    for (int count : chip_nPixels) {
+      totalPixels += count;
+    }
+    isMaskedFlat.resize(totalPixels);
+  }
+
+  int getChipOffset(int chipIdx) const {
+    if (chipIdx >= chip_nPixels.size()) {
+      throw std::out_of_range("chipIdx exceeds the number of chips.");
+    }
+    int offset = 0;
+    for (int i = 0; i < chipIdx; ++i) {
+      offset += chip_nPixels[i];
+    }
+    return offset;
+  }
+};
+
+struct ChipsSoAFlat {
+  const uint8_t* isMaskedFlat; // Pointer to the flattened pixel data
+  const int* chip_nPixels;  // Pointer to the array of number of pixels per chip
+
+  ALPAKA_FN_HOST_ACC int getChipOffset(int chipIdx) const {
+    // Compute the offset for the given chip index
+    int offset = 0;
+    for (int i = 0; i < chipIdx; ++i) {
+      offset += chip_nPixels[i];
+    }
+    return offset;
+  }
+};
+
+ChipsSoAFlat createFlatChipsSoA(const ChipsSoA& chipsSoA) {
+  return ChipsSoAFlat{
+      chipsSoA.isMaskedFlat.data(),
+      chipsSoA.chip_nPixels.data()};
+}
+
+struct ClusterKernel_1D {
+  template <typename Acc>
+  ALPAKA_FN_ACC void operator()(
+      Acc const& acc,
+      const ChipsSoAFlat& chipsSoA, // Pass ChipsSoA struct
+      int chipIdx,
+      int* clusterResults) const {
+
+    // Determine which pixel this thread is responsible for
+    auto const pixelIdx = alpaka::getIdx<alpaka::Grid, alpaka::Threads>(acc)[0]; // Thread index is the pixel index
+
+    // Ensure the pixel index is valid
+    int chipOffset = chipsSoA.getChipOffset(chipIdx);
+    int nextChipOffset = chipsSoA.getChipOffset(chipIdx + 1);
+    const auto nPixels = nextChipOffset - chipOffset;
+    if (pixelIdx >= nPixels) {
+      return;
+    }
+
+    // Example logic: Set clusterResults based on masking
+    clusterResults[pixelIdx] = chipsSoA.isMaskedFlat[chipsSoA.getChipOffset(chipIdx) + pixelIdx] ? 1 : 0;
+  }
+};
+/*
+struct ClusterKernel_2D {
     template <typename Acc>
     ALPAKA_FN_ACC void operator()(
         Acc const& acc,
-        int* pixelData,
-        int* clusterResults,
-        int npix) const
+        const ChipsSoA& chipsSoA, // The ChipsSoA structure containing the isMasked data
+        int* clusterResults) const
     {
-        auto const globalIdx = alpaka::getIdx<alpaka::Grid, alpaka::Blocks>(acc);
-        auto const idx = globalIdx[0];
+        // Block index represents the chip
+        auto chipIdx = alpaka::getIdx<alpaka::Grid, alpaka::Blocks>(acc)[0];
+        // Thread index within block processes pixels in the chip
+        auto pixelIdx = alpaka::getIdx<alpaka::Block, alpaka::Threads>(acc)[0];
 
-        if (idx >= npix) {
-            return; // Out of bounds
+        // Ensure the chip index is valid
+        if (chipIdx >= chipsSoA.isMasked.size()) {
+            return;
         }
 
-        // Basic example logic
-        clusterResults[idx] = pixelData[idx];
+        // Get the current chip
+        auto const& chip = chipsSoA.isMasked[chipIdx];
+        auto const nChipPiels = chip.size();
+        // Ensure the pixel index is valid
+        if (pixelIdx >= nChipPiels) {
+            return;
+        }
+
+        // Set clusterResults based on masking
+        clusterResults[pixelIdx] = chip[pixelIdx] ? 1 : 0;
     }
 };
-
+*/
 //__________________________________________________
 void Clusterer::process(int nThreads, PixelReader& reader, CompClusCont* compClus,
                         PatternCont* patterns, ROFRecCont* vecROFRec, MCTruth* labelsCl)
@@ -213,6 +300,11 @@ void Clusterer::process(int nThreads, PixelReader& reader, CompClusCont* compClu
 void Clusterer::ClustererThread::process(uint16_t chip, uint16_t nChips, CompClusCont* compClusPtr, PatternCont* patternsPtr,
                                          const ConstMCTruth* labelsDigPtr, MCTruth* labelsClPtr, const ROFRecord& rofPtr)
 {
+  // Initialize ChipsSoA
+  ChipsSoA chipsSoA;
+  // Resize the number of chips
+  chipsSoA.resizeChips(nChips);
+
   // Retrieve the host device
   auto platformHost = PltfHost{};
   auto deviceHost = alpaka::getDevByIdx(platformHost, 0);
@@ -239,6 +331,15 @@ void Clusterer::ClustererThread::process(uint16_t chip, uint16_t nChips, CompClu
     auto nclus0 = compClusPtr->size();
     auto validPixID = curChipData->getFirstUnmasked();
     auto npix = curChipData->getData().size();
+
+    // Resize the number of pixels for chip ic
+    chipsSoA.resizeChipPixels(ic, npix);
+    // Flatten chip data into a format usable by the kernel
+    for (int ipix = 0; ipix < npix; ++ipix) {
+      chipsSoA.isMaskedFlat[chipsSoA.getChipOffset(ic) + ipix] = curChipData->getData()[ipix].isMasked() ? 0 : 1;
+    }
+    ChipsSoAFlat chipsSoAFlat = createFlatChipsSoA(chipsSoA);
+
     if (validPixID < npix) { // chip data may have all of its pixels masked!
       auto valp = validPixID++;
       if (validPixID == npix) { // special case of a single pixel fired on the chip
@@ -248,37 +349,23 @@ void Clusterer::ClustererThread::process(uint16_t chip, uint16_t nChips, CompClu
         //__________________________________________________
         // Alpaka section
 
-        // Prepare pixel data and output container
-        std::vector<int> pixelDataHost(npix, 0);
-        std::vector<int> clusterResultsHost(npix, 0);
-
-        // Flatten chip data into a format usable by the kernel
-        for (int i = 0; i < npix; ++i) {
-          pixelDataHost[i] = curChipData->getData()[i].isMasked() ? 0 : 1;
-        }
-
-        // Allocate Alpaka buffers for input/output
-        auto hostPixelData = alpaka::allocBuf<int, Idx>(deviceHost, alpaka::Vec<Dim, Idx>::all(npix));
+        // Allocate Alpaka buffers for output
         auto hostClusterResults = alpaka::allocBuf<int, Idx>(deviceHost, alpaka::Vec<Dim, Idx>::all(npix));
-        auto devPixelData = alpaka::allocBuf<int, Idx>(deviceAcc, alpaka::Vec<Dim, Idx>::all(npix));
         auto devClusterResults = alpaka::allocBuf<int, Idx>(deviceAcc, alpaka::Vec<Dim, Idx>::all(npix));
 
-        // Copy data to device
-        std::memcpy(alpaka::getPtrNative(hostPixelData), pixelDataHost.data(), npix * sizeof(int));
-        alpaka::memcpy(queue, devPixelData, hostPixelData);
-        alpaka::wait(queue); // Ensure data transfer is complete
-
         // Define kernel execution configuration
-        auto const gridSize = alpaka::Vec<Dim, Idx>::all(npix);
-        auto const blockSize = alpaka::Vec<Dim, Idx>::all(1);
-        auto const workDiv = alpaka::WorkDivMembers<Dim, Idx>(gridSize, blockSize, alpaka::Vec<Dim, Idx>::all(1));
+        auto const gridSize = alpaka::Vec<Dim, Idx>::all(1); // number of blocks per chip
+        auto const blockSize = alpaka::Vec<Dim, Idx>::all(1); // number of threads (pixels) per block (chip)
+        auto const threadSize = alpaka::Vec<Dim, Idx>::all(1); // number of elements per thread
+        auto const workDiv = alpaka::WorkDivMembers<Dim, Idx>(gridSize, blockSize, threadSize);
 
         // Launch the kernel
         alpaka::enqueue(queue, alpaka::createTaskKernel<Acc>(
-                                   workDiv, ClusterKernel{},
-                                   alpaka::getPtrNative(devPixelData),
-                                   alpaka::getPtrNative(devClusterResults),
-                                   npix));
+                                   workDiv,
+                                   ClusterKernel_1D{},
+                                   chipsSoAFlat,
+                                   ic,
+                                   alpaka::getPtrNative(devClusterResults)));
         alpaka::wait(queue); // Ensure kernel execution is complete
 
         // Copy results back to host
@@ -286,7 +373,7 @@ void Clusterer::ClustererThread::process(uint16_t chip, uint16_t nChips, CompClu
         alpaka::wait(queue); // Ensure data transfer is complete
 
         // Extract results from Alpaka buffer
-        std::memcpy(clusterResultsHost.data(), alpaka::getPtrNative(hostClusterResults), npix * sizeof(int));
+        auto clusterResultsHost = alpaka::getPtrNative(hostClusterResults);
         //__________________________________________________
 
         // Process the results (updateChip equivalent)
