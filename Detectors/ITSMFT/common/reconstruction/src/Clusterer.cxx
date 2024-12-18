@@ -123,7 +123,7 @@ struct ClusterKernel_1D {
     clusterResults[pixelIdx] = chipsSoA.isMaskedFlat[chipsSoA.getChipOffset(chipIdx) + pixelIdx] ? 1 : 0;
   }
 };
-/*
+
 struct ClusterKernel_2D {
     template <typename Acc>
     ALPAKA_FN_ACC void operator()(
@@ -153,7 +153,7 @@ struct ClusterKernel_2D {
         clusterResults[pixelIdx] = chip[pixelIdx] ? 1 : 0;
     }
 };
-*/
+
 //__________________________________________________
 void Clusterer::process(int nThreads, PixelReader& reader, CompClusCont* compClus,
                         PatternCont* patterns, ROFRecCont* vecROFRec, MCTruth* labelsCl)
@@ -356,8 +356,8 @@ void Clusterer::ClustererThread::process(uint16_t chip, uint16_t nChips, CompClu
 
         // Define kernel execution configuration
         auto const gridSize = alpaka::Vec<Dim, Idx>::all(1); // number of blocks per chip
-        auto const blockSize = alpaka::Vec<Dim, Idx>::all(1); // number of threads (pixels) per block (chip)
-        auto const threadSize = alpaka::Vec<Dim, Idx>::all(1); // number of elements per thread
+        auto const blockSize = alpaka::Vec<Dim, Idx>::all(8); // number of threads (pixels) per block (chip)
+        auto const threadSize = alpaka::Vec<Dim, Idx>::all(1); // number of elements to be executed per thread
         auto const workDiv = alpaka::WorkDivMembers<Dim, Idx>(gridSize, blockSize, threadSize);
 
         // Launch the kernel
