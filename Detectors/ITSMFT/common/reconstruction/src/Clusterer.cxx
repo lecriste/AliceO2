@@ -22,6 +22,9 @@
 #include <omp.h>
 #endif
 
+#include <chrono> // Add for timing
+
+
 #include <iostream>
 #include <alpaka/alpaka.hpp>
 
@@ -35,11 +38,11 @@ using PltfHost = alpaka::Platform<Host>;
 
 // Accelerator and Accelerator Platform
 //using Acc = alpaka::AccGpuCudaRt<Dim, Idx>; // GPU accelerator
-using Acc = alpaka::AccCpuSerial<Dim, Idx>;
+//using Acc = alpaka::AccCpuSerial<Dim, Idx>;
 //using Acc = alpaka::AccCpuOmp2Threads<Dim, Idx>;
+using Acc = alpaka::AccCpuThreads<Dim, Idx>;
 using PltfAcc = alpaka::Platform<Acc>; // Accelerator Platform
 
-std::ostream& usings = (std::cout << "\nafter alpaka usings\n");
 
 using namespace o2::itsmft;
 
@@ -158,9 +161,12 @@ struct ClusterKernel_2D {
 void Clusterer::process(int nThreads, PixelReader& reader, CompClusCont* compClus,
                         PatternCont* patterns, ROFRecCont* vecROFRec, MCTruth* labelsCl)
 {
+  auto start = std::chrono::high_resolution_clock::now();
+
 #ifdef _PERFORM_TIMING_
   mTimer.Start(kFALSE);
 #endif
+
   if (nThreads < 1) {
     nThreads = 1;
   }
@@ -292,9 +298,14 @@ void Clusterer::process(int nThreads, PixelReader& reader, CompClusCont* compClu
     rof.setNEntries(compClus->size() - rof.getFirstEntry()); // update
   } while (autoDecode);
   reader.setDecodeNextAuto(autoDecode); // restore setting
+
 #ifdef _PERFORM_TIMING_
   mTimer.Stop();
 #endif
+
+  auto end = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double> elapsed = end - start;
+  LOG(info) << "\n\n\nALPAKA Clusterer::process executed in " << elapsed.count() << " seconds.\n\n";
 }
 
 //__________________________________________________
@@ -649,7 +660,6 @@ void Clusterer::print() const
             << " Real: " << tmr.RealTime() << " s in " << tmr.Counter() << " slots";
   LOG(info) << "Threads output merging timing                : Cpu: " << tmrm.CpuTime()
             << " Real: " << tmrm.RealTime() << " s in " << tmrm.Counter() << " slots";
-
 #endif
 }
 
